@@ -30,7 +30,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse
 from matplotlib.legend import Legend
 from matplotlib.legend_handler import HandlerPatch
-from scipy.stats import gaussian_kde, ttest_ind, ttest_rel, linregress
+from scipy.stats import gaussian_kde, ttest_ind, ttest_rel, ttest_1samp, linregress
 from scipy.stats import t as t_dist
 from shapely.geometry import Polygon, Point
 
@@ -60,7 +60,7 @@ Legend.update_default_handler_map({Ellipse: _HandlerEllipse()})
 # =====================================================================
 
 # --- Paths ---
-ROOT_DIR = r'C:\Users\User\Desktop\Analysis\data\raw'
+ROOT_DIR = r'C:\Users\User\Desktop\דברים\לימודים\שנה ג\מחקר מודרך\Analysis\data\raw'
 # One example session, used for single-subject mode and for reading the trial
 # list in multi-trial mode (trials are identical across participants).
 EXAMPLE_SESSION = os.path.join(
@@ -103,6 +103,18 @@ FILL_COLORS = {True: '#3498DB', False: '#E67E22'}   # filled = blue, unfilled = 
 # ANALYTICS_FILL controls whether graphs 2 & 3 split by fill ('both') or show a
 # single condition ('filled' | 'unfilled'); graph 1 always compares both.
 ANALYTICS_FILL = 'filled'   # 'filled' | 'unfilled' | 'both'
+SHOW_CENTER_BIAS = True     # add the screen-center bias analysis figure
+SHOW_RAW_POINTS = True      # overlay individual-trial points on the mean/SD plots
+# Restrict the analytics dataset to specific polygon sides / rotations / stretch
+# steps (this does NOT filter by participant). None = use all values.
+ANALYTICS_SIDES = 7      # e.g. 7 or [5, 6] to keep only those vertex counts
+ANALYTICS_ROTATIONS = [0]  # e.g. [0, 90] to keep only those rotations
+ANALYTICS_STEPS = -1, 0, 1, 3, 4      # e.g. [3, 4] to keep only those stretch steps
+# When True, fit a per-participant ellipse per trial and AVERAGE within each
+# subject+condition first, so every plotted point / statistical observation is a
+# subject mean (repeated-measures), not an individual trial. When False, all
+# participants' fixations are pooled into one ellipse per trial (the default).
+USE_SUBJECT_AVERAGES = True
 
 # --- Statistical significance annotations (analytics graphs) ---
 # Annotate statistically significant points/comparisons with an asterisk (*).
@@ -154,10 +166,10 @@ SHOW_STATS_PLOT = False       # in 'multi' mode, also emit the statistical-infer
 # --- Multi-trial layout (PLOT_MODE == 'multi') ---
 # 'rotations' : fix (sides, step), show every rotation of that polygon.
 # 'variations': fix (sides, rotation), show every step/variation at that rotation.
-MULTI_GROUP_BY = 'rotations'
-MULTI_SIDES = 5       # number of polygon vertices to select
-MULTI_STEP = 4            # used when MULTI_GROUP_BY == 'rotations'
-MULTI_ROTATION = 0        # used when MULTI_GROUP_BY == 'variations'
+MULTI_GROUP_BY = 'variations'
+MULTI_SIDES =  7     # number of polygon vertices to select
+MULTI_STEP =  4            # used when MULTI_GROUP_BY == 'rotations'
+MULTI_ROTATION = 0    # used when MULTI_GROUP_BY == 'variations'
 MULTI_AGGREGATE = True    # True: pool fixations across all sessions; False: EXAMPLE_SESSION only
 # Each geometric polygon was shown twice: once image-filled, once not. Choose
 # which to display so the figure is not overcrowded.
@@ -393,6 +405,16 @@ def select_trials(session_folder, group_by, sides, step=None, rotation=None,
     Returns a list of param dicts (each with 'trial_index' and 'is_filled')
     ordered by the varying parameter.
     """
+    # Accept a single value or a list/tuple/set for step / rotation.
+    def _as_set(v, mod=None):
+        if v is None:
+            return None
+        seq = v if isinstance(v, (list, tuple, set)) else [v]
+        return {(x % mod if mod is not None else x) for x in seq}
+
+    step_set = _as_set(step)
+    rot_set = _as_set(rotation, mod=360)
+
     table = trial_param_table(session_folder)
     fill_map = build_fill_map()
     mismatches = 0
@@ -400,9 +422,9 @@ def select_trials(session_folder, group_by, sides, step=None, rotation=None,
     for t in table:
         if t['sides'] != sides:
             continue
-        if group_by == 'rotations' and t['step'] != step:
+        if group_by == 'rotations' and step_set is not None and t['step'] not in step_set:
             continue
-        if group_by == 'variations' and t['rotation'] != rotation % 360:
+        if group_by == 'variations' and rot_set is not None and t['rotation'] not in rot_set:
             continue
 
         # Recover the fill flag, but only trust it when the reconstructed
@@ -427,8 +449,12 @@ def select_trials(session_folder, group_by, sides, step=None, rotation=None,
         print(f"Warning: fill mapping disagreed with geometry on {mismatches} "
               f"trial(s); EXP_* config may be out of sync with run_experiment.py.")
 
-    sort_key = 'rotation' if group_by == 'rotations' else 'step'
-    matches.sort(key=lambda t: (t[sort_key] is None, t[sort_key]))
+    # Order by the varying parameter first, then the other one (so multi-valued
+    # selections lay out tidily).
+    primary = 'rotation' if group_by == 'rotations' else 'step'
+    secondary = 'step' if group_by == 'rotations' else 'rotation'
+    matches.sort(key=lambda t: (t[primary] is None, t[primary],
+                                t[secondary] is None, t[secondary]))
     return matches
 
 
@@ -1200,7 +1226,8 @@ def plot_multi_statistics(stats_records, group_by, fill):
             title=f'Mean model axis lengths (±SD): Filled vs Unfilled ({src})')
 
 
-def _fig_axis_length_bars(usable, title='Mean model axis lengths (±SD): Filled vs Unfilled'):
+def _fig_axis_length_bars(usable, title='Mean model axis lengths (±SD): Filled vs Unfilled',
+                          by_subject=False):
     """Grouped bar chart of mean semi-major/semi-minor (+/-SD), Filled vs Unfilled.
 
     Laid out like the offset bar chart: one column per axis (Major / Minor),
@@ -1215,7 +1242,8 @@ def _fig_axis_length_bars(usable, title='Mean model axis lengths (±SD): Filled 
     _draw_grouped_bars(
         ax, usable, fills, metrics,
         value_fn=lambda r, key: to_distance(r['stats'][key]),
-        ylabel=f'Mean semi-axis length ({dist_unit_label()})', title=title)
+        ylabel=f'Mean semi-axis length ({dist_unit_label()})', title=title,
+        by_subject=by_subject)
 
 
 # --------------------------------------------------------------------------- #
@@ -1248,24 +1276,42 @@ def _read_session_efix(asc_file_path):
     return time_offset, efix
 
 
-def collect_all_stats(root_dir, aggregate=MULTI_AGGREGATE):
+def collect_all_stats(root_dir, aggregate=MULTI_AGGREGATE, by_subject=False):
     """
     Fit a 2D Gaussian to every auto-polygon trial and return the parameter
-    records (no plotting). Each record matches the shape used by the multi-trial
-    statistics: sides / rotation / step / is_filled / base_centroid /
-    actual_centroid / stats. Fixations are pooled across all sessions when
-    `aggregate` is True.
+    records (no plotting). Each record has: sides / rotation / step / is_filled /
+    base_centroid / actual_centroid / stats.
 
-    Each session's ASC and CSV are read ONCE and filtered in memory (rather than
-    re-reading per trial), so this stays fast over the whole dataset. Window,
-    saccade-latency, and boundary filtering match extract_valid_fixations.
+    by_subject = False (default): fixations are pooled across all sessions, so
+    each record is one trial (one ellipse fit on every participant's gaze).
+
+    by_subject = True: one record PER (participant, trial) for DISTANCE/offset
+    analyses only. 'stats' holds just the subject's arithmetic gaze centroid
+    (mean X/Y of that trial's fixations) -- no ellipse is fit -- and a
+    'subject_id' field is added, so downstream figures can average within subject
+    (repeated-measures). Orientation/ellipse-shape metrics are NOT produced here;
+    those always use the pooled records.
+
+    Each session's ASC and CSV are read ONCE and filtered in memory, so this
+    stays fast. Window, saccade-latency, and boundary filtering match
+    extract_valid_fixations.
     """
     sessions = find_session_folders(root_dir) if aggregate else [EXAMPLE_SESSION]
     if not sessions:
         return [], 0
 
     fill_map = build_fill_map()
-    pooled = {}          # trial_index -> accumulator dict
+
+    def _is_filled(ti, params):
+        combo = fill_map.get(ti)
+        if (combo and combo['sides'] == params['sides']
+                and combo['step'] == params['step']
+                and combo['rotation'] == params['rotation']):
+            return combo['is_filled']
+        return None
+
+    pooled = {}            # trial_index -> accumulator (cross-subject pooling)
+    subject_records = []   # one per (subject, trial) when by_subject
     n_used = 0
     for sess in sessions:
         try:
@@ -1276,6 +1322,8 @@ def collect_all_stats(root_dir, aggregate=MULTI_AGGREGATE):
         if time_offset is None:
             continue
         n_used += 1
+        # Participant id (root/participant_X/session_Y -> participant_X).
+        subject_id = os.path.basename(os.path.dirname(sess))
 
         df = pd.read_csv(os.path.join(sess, 'trials.csv'))
         df = df[df['trial_index'].notna()].copy()
@@ -1294,20 +1342,44 @@ def collect_all_stats(root_dir, aggregate=MULTI_AGGREGATE):
                 if window_start <= aligned <= stim_off:
                     xs.append(x)
                     ys.append(y)
-            if ti not in pooled:
-                polygon = _place_polygon(
-                    parse_polygon_str(row['polygon_points_imgspace']),
-                    (float(row['stim_top_left_x_px']),
-                     float(row['stim_top_left_y_px'])))
-                pooled[ti] = {
-                    'x': [], 'y': [], 'polygon': polygon,
-                    'base_centroid': (float(row['stim_center_x_px']),
-                                      float(row['stim_center_y_px'])),
+            polygon = _place_polygon(
+                parse_polygon_str(row['polygon_points_imgspace']),
+                (float(row['stim_top_left_x_px']),
+                 float(row['stim_top_left_y_px'])))
+            base_centroid = (float(row['stim_center_x_px']),
+                             float(row['stim_center_y_px']))
+
+            if by_subject:
+                # Distances use the subject's arithmetic gaze centroid for this
+                # trial (mean X/Y of the fixations) -- NOT a trial-level ellipse
+                # fit -- so every trial with >=1 fixation is kept.
+                fx, fy = _filter_by_boundary_distance(
+                    xs, ys, polygon,
+                    FIXATION_BOUNDARY_DIST_PX, FIXATION_BOUNDARY_MODE)
+                if not fx:
+                    continue
+                gaze_mean = (float(np.mean(fx)), float(np.mean(fy)))
+                subject_records.append({
+                    'trial_index': ti, 'subject_id': subject_id,
                     'sides': params['sides'], 'rotation': params['rotation'],
-                    'step': params['step'],
-                }
-            pooled[ti]['x'].extend(xs)
-            pooled[ti]['y'].extend(ys)
+                    'step': params['step'], 'is_filled': _is_filled(ti, params),
+                    'base_centroid': base_centroid,
+                    'actual_centroid': _actual_centroid(polygon),
+                    'stats': {'mean': gaze_mean},   # only the centre is defined
+                })
+            else:
+                if ti not in pooled:
+                    pooled[ti] = {
+                        'x': [], 'y': [], 'polygon': polygon,
+                        'base_centroid': base_centroid,
+                        'sides': params['sides'], 'rotation': params['rotation'],
+                        'step': params['step'],
+                    }
+                pooled[ti]['x'].extend(xs)
+                pooled[ti]['y'].extend(ys)
+
+    if by_subject:
+        return subject_records, n_used
 
     records = []
     for ti, d in pooled.items():
@@ -1315,15 +1387,12 @@ def collect_all_stats(root_dir, aggregate=MULTI_AGGREGATE):
         x, y = _filter_by_boundary_distance(
             d['x'], d['y'], d['polygon'],
             FIXATION_BOUNDARY_DIST_PX, FIXATION_BOUNDARY_MODE)
-        combo = fill_map.get(ti)
-        is_filled = None
-        if (combo and combo['sides'] == d['sides']
-                and combo['step'] == d['step']
-                and combo['rotation'] == d['rotation']):
-            is_filled = combo['is_filled']
         records.append({
             'trial_index': ti, 'sides': d['sides'], 'rotation': d['rotation'],
-            'step': d['step'], 'is_filled': is_filled,
+            'step': d['step'],
+            'is_filled': _is_filled(ti, {'sides': d['sides'],
+                                         'step': d['step'],
+                                         'rotation': d['rotation']}),
             'base_centroid': d['base_centroid'],
             'actual_centroid': _actual_centroid(d['polygon']),
             'stats': fit_gaussian(x, y, ref_point=d['base_centroid']),
@@ -1336,13 +1405,34 @@ def _fills_to_plot(fill):
             'unfilled': [False]}.get(fill, [True, False])
 
 
-def _draw_grouped_bars(ax, usable, fills_to_plot, metrics, value_fn, ylabel, title):
+def _cell_values(records, predicate, value_fn, by_subject):
+    """Collect one numeric value per data point for a condition cell.
+
+    Trials are selected by `predicate(record)`; `value_fn(record)` returns the
+    per-trial metric (or None). With `by_subject`, the metrics are first averaged
+    within each subject (so the returned values are per-subject means); otherwise
+    every matching trial contributes one value.
+    """
+    matched = [r for r in records if predicate(r)]
+    if not by_subject:
+        return [v for v in (value_fn(r) for r in matched) if v is not None]
+    per_subject = {}
+    for r in matched:
+        v = value_fn(r)
+        if v is not None:
+            per_subject.setdefault(r.get('subject_id'), []).append(v)
+    return [float(np.mean(vs)) for vs in per_subject.values() if vs]
+
+
+def _draw_grouped_bars(ax, usable, fills_to_plot, metrics, value_fn, ylabel,
+                       title, by_subject=False):
     """Draw a Filled/Unfilled grouped bar chart (mean +/- SD) with significance.
 
     `metrics` is a list of (column_label, key); `value_fn(record, key)` returns
     one numeric value per trial (or None). Bars are dodged by condition; when
     both Filled and Unfilled are present, a Welch t-test compares them within
     each category and a black asterisk is drawn above any significant category.
+    With `by_subject`, every value is first averaged within each subject.
     """
     xpos = np.arange(len(metrics))
     width = 0.8 / len(fills_to_plot)
@@ -1350,8 +1440,8 @@ def _draw_grouped_bars(ax, usable, fills_to_plot, metrics, value_fn, ylabel, tit
     for i, isf in enumerate(fills_to_plot):
         means, sds = [], []
         for mi, (_label, key) in enumerate(metrics):
-            vals = [value_fn(r, key) for r in usable if r['is_filled'] == isf]
-            vals = [v for v in vals if v is not None]
+            vals = _cell_values(usable, lambda r, _isf=isf: r['is_filled'] == _isf,
+                                lambda r, _k=key: value_fn(r, _k), by_subject)
             raw[(mi, isf)] = vals
             m = float(np.mean(vals)) if vals else 0.0
             s = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
@@ -1363,6 +1453,10 @@ def _draw_grouped_bars(ax, usable, fills_to_plot, metrics, value_fn, ylabel, tit
                alpha=0.6, edgecolor='black', linewidth=0.8, capsize=6,
                error_kw=dict(ecolor='black', elinewidth=1.2, capthick=1.2),
                label=_fill_word(isf), zorder=2)
+        if SHOW_RAW_POINTS:
+            for mi in range(len(metrics)):
+                _scatter_raw(ax, xpos[mi] + off, raw[(mi, isf)],
+                             _shade(FILL_COLORS[isf], 0.6), jitter=width * 0.28)
     ax.set_xticks(xpos)
     ax.set_xticklabels([m[0] for m in metrics])
     ax.set_ylabel(ylabel)
@@ -1379,7 +1473,7 @@ def _draw_grouped_bars(ax, usable, fills_to_plot, metrics, value_fn, ylabel, tit
         ax.legend(title='Condition', loc='upper left')
 
 
-def _fig_offset_bars(usable, fills_to_plot):
+def _fig_offset_bars(usable, fills_to_plot, by_subject=False):
     """Grouped bars: mean ellipse-center offset from each centroid (+/-SD)."""
     fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
     metrics = [('Original\ncentroid', 'base_centroid'),
@@ -1391,7 +1485,21 @@ def _fig_offset_bars(usable, fills_to_plot):
     title = 'All trials — mean model-center offset from centroids (±SD)'
     _draw_grouped_bars(
         ax, usable, fills_to_plot, metrics, value_fn,
-        ylabel=f'Mean model-center offset ({dist_unit_label()})', title=title)
+        ylabel=f'Mean model-center offset ({dist_unit_label()})', title=title,
+        by_subject=by_subject)
+
+
+def _scatter_raw(ax, x_center, values, color, jitter=0.0, zorder=4):
+    """Overlay individual-trial values as a jittered strip at `x_center`."""
+    if not values:
+        return
+    rng = np.random.default_rng(0)      # deterministic jitter
+    if jitter > 0:
+        xs = x_center + rng.uniform(-jitter, jitter, size=len(values))
+    else:
+        xs = np.full(len(values), x_center)
+    ax.scatter(xs, values, s=12, color=color, alpha=0.35, edgecolors='none',
+               zorder=zorder)
 
 
 def _shade(color, factor):
@@ -1421,12 +1529,14 @@ def _circular_std_deg(angles):
     return math.degrees(math.sqrt(-2.0 * math.log(R)))
 
 
-def _fig_offset_vs(usable, fills_to_plot, xkey, xlabel, title, dodge):
+def _fig_offset_vs(usable, fills_to_plot, xkey, xlabel, title, dodge,
+                   by_subject=False):
     """Line plot: mean ellipse-center offset (+/-SD) vs `xkey` (step or rotation).
 
     Color = fill; linestyle = which centroid (base solid, center of mass dashed,
     drawn in a darker shade). Series are dodged along X by `dodge` so the error
-    bars sit side-by-side rather than overlapping.
+    bars sit side-by-side rather than overlapping. With `by_subject`, each x/fill
+    cell's values are subject means.
     """
     fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
     metrics = [('Offset from original centroid', 'base_centroid', '-', 1.0),
@@ -1445,9 +1555,13 @@ def _fig_offset_vs(usable, fills_to_plot, xkey, xlabel, title, dodge):
         for mi, (name, key, ls, shade) in enumerate(metrics):
             xs, ys, es = [], [], []
             for xv in xvals:
-                vals = [_euclidean(r[key], r['stats']['mean']) for r in usable
-                        if r['is_filled'] == isf and r[xkey] == xv]
-                vals = [to_distance(v) for v in vals if v is not None]
+                vals = _cell_values(
+                    usable,
+                    lambda r, _isf=isf, _xv=xv: (r['is_filled'] == _isf
+                                                 and r[xkey] == _xv),
+                    lambda r, _k=key: to_distance(
+                        _euclidean(r[_k], r['stats']['mean'])),
+                    by_subject)
                 if not vals:
                     continue
                 m = float(np.mean(vals))
@@ -1460,17 +1574,21 @@ def _fig_offset_vs(usable, fills_to_plot, xkey, xlabel, title, dodge):
             if not xs:
                 continue
             series.append((xs, ys, es, _shade(FILL_COLORS[isf], shade), ls,
-                           f"{name}{cond}"))
+                           f"{name}{cond}", mi, isf))
 
     n = len(series)
     handles, labels = [], []
-    for idx, (xs, ys, es, color, ls, label) in enumerate(series):
+    for idx, (xs, ys, es, color, ls, label, mi, isf) in enumerate(series):
         shift = (idx - (n - 1) / 2.0) * dodge
         xs_d = [x + shift for x in xs]
         ax.errorbar(xs_d, ys, yerr=es, color=color, linestyle=ls, marker='o',
                     capsize=4, elinewidth=1.2, alpha=0.7)
         handles.append(Line2D([0], [0], color=color, linestyle=ls, linewidth=2))
         labels.append(label)
+        if SHOW_RAW_POINTS:
+            jitter = abs(dodge) * 0.35 if dodge else 0.0
+            for xd, xv in zip(xs_d, xs):
+                _scatter_raw(ax, xd, samples[(mi, isf, xv)], color, jitter=jitter)
 
     # Significance asterisks. With both conditions shown, compare Filled vs
     # Unfilled within each centroid (asterisk colored by centroid). With a single
@@ -1545,8 +1663,12 @@ def _add_regression(ax, xs, ys, color, x_range):
             f"p = {lr.pvalue:.3f}")
 
 
-def _fig_orientation_vs_rotation(usable, fills_to_plot):
-    """Line plot: mean ellipse orientation (circular mean) vs polygon rotation."""
+def _fig_orientation_vs_rotation(usable, fills_to_plot, by_subject=False):
+    """Line plot: mean ellipse orientation (circular mean) vs polygon rotation.
+
+    With `by_subject`, each rotation/fill cell is first reduced to one circular
+    mean per subject, so the plotted mean/SD and raw points are subject-level.
+    """
     fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
     rotations = sorted({r['rotation'] for r in usable if r['rotation'] is not None})
     all_y = []
@@ -1555,15 +1677,27 @@ def _fig_orientation_vs_rotation(usable, fills_to_plot):
     x_range = (min(rotations), max(rotations)) if rotations else (0, 1)
     reg_notes = []          # (text, color) per condition for the stats box
     for i, isf in enumerate(fills_to_plot):
-        xs, ys, es = [], [], []
+        xs, ys, es, raws = [], [], [], []
         for rot in rotations:
-            angs = [r['stats']['angle_deg_360'] for r in usable
-                    if r['is_filled'] == isf and r['rotation'] == rot]
+            sel = [r['stats']['angle_deg_360'] for r in usable
+                   if r['is_filled'] == isf and r['rotation'] == rot]
+            if by_subject:
+                # One circular mean per subject, then aggregate across subjects.
+                per_subj = {}
+                for r in usable:
+                    if r['is_filled'] == isf and r['rotation'] == rot:
+                        per_subj.setdefault(r.get('subject_id'), []).append(
+                            r['stats']['angle_deg_360'])
+                angs = [_circular_mean_deg(a) for a in per_subj.values() if a]
+            else:
+                angs = sel
             if not angs:
                 continue
             xs.append(rot)
             ys.append(_circular_mean_deg(angs))
             es.append(_circular_std_deg(angs))   # angular variability (deg)
+            raws.append(angs)                    # individual-trial orientations
+        offset0 = 0.0
         if len(ys) > 1:
             # An ellipse axis is only defined modulo 180 deg, so unwrap with a
             # 180 deg (pi rad) period: this removes the symmetry-induced "drop"
@@ -1587,6 +1721,22 @@ def _fig_orientation_vs_rotation(usable, fills_to_plot):
         point_color = _shade(FILL_COLORS[isf], 0.6)
         ax.errorbar(xs_d, ys, yerr=es, fmt='o', color=point_color,
                     capsize=4, elinewidth=1.2, alpha=0.9, label=label)
+
+        if SHOW_RAW_POINTS:
+            for k, xd in enumerate(xs_d):
+                # Map each raw orientation into the aligned frame: subtract the
+                # baseline offset, then wrap to within +-90 deg of this point's
+                # mean (orientation is axial, i.e. defined mod 180 deg).
+                pts = []
+                for a in raws[k]:
+                    v = a - offset0
+                    while v - ys[k] > 90.0:
+                        v -= 180.0
+                    while v - ys[k] < -90.0:
+                        v += 180.0
+                    pts.append(v)
+                all_y.extend(pts)
+                _scatter_raw(ax, xd, pts, point_color, jitter=dodge * 0.4)
 
         # Linear regression trendline + 95% CI band, with stats for the box.
         note = _add_regression(ax, xs, ys, FILL_COLORS[isf], x_range)
@@ -1622,35 +1772,221 @@ def _fig_orientation_vs_rotation(usable, fills_to_plot):
         ax.legend(title='Condition', loc='upper left')
 
 
-def plot_all_data_statistics(root_dir, fill=ANALYTICS_FILL,
-                             aggregate=MULTI_AGGREGATE):
+def _fig_center_bias(usable, fills_to_plot, by_subject=False):
+    """Evaluate whether the gaze deviation is biased toward the screen center.
+
+    All geometry is in full-screen pixel coordinates (0..SCREEN_W x 0..SCREEN_H).
+    For each trial, with the polygon's geometric centroid as the common origin:
+
+        screen_vec = screen_center        - polygon_centroid
+        gaze_vec   = ellipse_center(gaze) - polygon_centroid
+        projection = gaze_vec . unit(screen_vec)
+
+    A positive projection means the gaze center is displaced TOWARD the screen
+    center; negative means away from it. A one-sample t-test vs 0 tests whether
+    the mean projection differs from zero (i.e. a systematic center bias).
+
+    Two panels: (left) the gaze vectors drawn in screen space with the screen
+    center marked, colored by projection sign; (right) the distribution of the
+    scalar projections with the per-condition mean and t-test annotation.
     """
-    Analytical graphs computed over ALL trials (no polygon/fixation panels):
+    screen_center = np.array([SCREEN_W / 2.0, SCREEN_H / 2.0])
+
+    # Stimuli are shown on a 3x3 grid of positions; the requirement is to use
+    # only the OFF-center grid points. Identify the center grid point (the stim
+    # placement nearest the screen center) from the recorded stim centers and
+    # drop every trial shown there.
+    grid_pts = {(round(r['base_centroid'][0]), round(r['base_centroid'][1]))
+                for r in usable if r['base_centroid'] is not None}
+    center_grid = (min(grid_pts, key=lambda p: math.hypot(
+        p[0] - screen_center[0], p[1] - screen_center[1]))
+        if grid_pts else None)
+    grid_tol = 5.0   # px; grid spacing is ~144 px, so this isolates one point
+
+    rows = []
+    n_excluded = 0
+    for r in usable:
+        bc = r['base_centroid']              # stim placement (grid point)
+        pc = r['actual_centroid']            # polygon (geometric) centroid
+        gaze = r['stats']['mean']            # fitted ellipse center
+        if bc is None or pc is None or gaze is None:
+            continue
+        # Exclude the center grid point (stimulus centered on the screen middle).
+        if center_grid is not None and math.hypot(
+                bc[0] - center_grid[0], bc[1] - center_grid[1]) < grid_tol:
+            n_excluded += 1
+            continue
+        pc = np.asarray(pc, dtype=float)
+        gaze = np.asarray(gaze, dtype=float)
+        svec = screen_center - pc
+        slen = float(np.hypot(*svec))
+        if slen < 1e-6:                      # polygon already at screen center
+            continue
+        gvec = gaze - pc
+        proj = float(np.dot(gvec, svec) / slen)   # scalar projection (px)
+        rows.append(dict(pc=pc, gvec=gvec, proj=proj, is_filled=r['is_filled'],
+                         subject_id=r.get('subject_id')))
+    if not rows:
+        print('[center-bias] no usable off-center trials.')
+        return
+    print(f"[center-bias] {len(rows)} off-center trials "
+          f"(excluded {n_excluded} at center grid {center_grid}).")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6),
+                                   constrained_layout=True)
+
+    # ---- Left: gaze vectors in full-screen space ------------------------- #
+    scale = 4.0                              # exaggerate gaze vectors for clarity
+    for d in rows:
+        col = 'tab:green' if d['proj'] >= 0 else 'tab:red'
+        tip = d['pc'] + d['gvec'] * scale
+        ax1.annotate('', xy=tip, xytext=d['pc'],
+                     arrowprops=dict(arrowstyle='->', color=col, lw=1.0,
+                                     alpha=0.7))
+        ax1.scatter(*d['pc'], s=8, color='0.4', zorder=3)
+    ax1.scatter(*screen_center, marker='*', s=240, color='black', zorder=6)
+    ax1.set_xlim(0, SCREEN_W)
+    ax1.set_ylim(SCREEN_H, 0)               # inverted Y: (0,0) at top-left
+    ax1.set_aspect('equal', adjustable='box')
+    ax1.set_xlabel('X (px)', fontsize=11)
+    ax1.set_ylabel('Y (px)', fontsize=11)
+    ax1.set_title('Gaze displacement vs screen-center direction', fontsize=12)
+    ax1.grid(True, linestyle=':', alpha=0.5, linewidth=0.6)
+    ax1.legend(handles=[
+        Line2D([0], [0], color='tab:green', lw=2, label='Toward center (proj > 0)'),
+        Line2D([0], [0], color='tab:red', lw=2, label='Away from center (proj < 0)'),
+        Line2D([0], [0], marker='*', color='black', lw=0, markersize=12,
+               label='Screen center')], fontsize=8, loc='best')
+    ax1.text(0.02, 0.02, f'gaze arrows ×{scale:g}', transform=ax1.transAxes,
+             fontsize=8, color='0.4')
+
+    # ---- Right: distribution of scalar projections + t-test vs 0 --------- #
+    # With by_subject, reduce each fill's projections to one mean per subject.
+    def _projections(isf):
+        return _cell_values(rows, lambda d, _isf=isf: d['is_filled'] == _isf,
+                            lambda d: d['proj'], by_subject)
+
+    proj_all = [d['proj'] for d in rows]
+    bins = (np.linspace(min(proj_all), max(proj_all), 20)
+            if len(proj_all) > 1 else 10)
+    notes = []
+    for isf in fills_to_plot:
+        pr = _projections(isf)
+        if not pr:
+            continue
+        color = FILL_COLORS[isf]
+        lab = _fill_word(isf) if len(fills_to_plot) > 1 else 'Projection'
+        ax2.hist(pr, bins=bins, color=color, alpha=0.5, label=lab)
+        m = float(np.mean(pr))
+        ax2.axvline(m, color=_shade(color, 0.6), linestyle='--', linewidth=1.5)
+        p = float(ttest_1samp(pr, 0.0).pvalue) if len(pr) > 1 else float('nan')
+        bias = 'toward' if m > 0 else 'away'
+        unit = 'subjects' if by_subject else 'trials'
+        notes.append((f'{_fill_word(isf)}: mean={m:.1f}px ({bias}), '
+                      f'p={p:.3f} (n={len(pr)} {unit})', color))
+    ax2.axvline(0, color='black', linewidth=1.0)
+    ax2.set_xlabel('Scalar projection toward screen center (px)', fontsize=11)
+    ax2.set_ylabel('Subject count' if by_subject else 'Trial count', fontsize=11)
+    ax2.set_title('Center-bias of gaze displacement', fontsize=12)
+    ax2.grid(True, axis='y', linestyle=':', alpha=0.5, linewidth=0.6)
+    if len(fills_to_plot) > 1:
+        ax2.legend(fontsize=8, loc='upper right')
+    y0 = 0.97
+    for text, color in notes:
+        ax2.text(0.02, y0, text, transform=ax2.transAxes, va='top', ha='left',
+                 fontsize=9, color=color,
+                 bbox=dict(boxstyle='round,pad=0.35', facecolor='white',
+                           edgecolor='0.6', alpha=0.9))
+        y0 -= 0.085
+
+
+def plot_all_data_statistics(root_dir, fill=ANALYTICS_FILL,
+                             aggregate=MULTI_AGGREGATE,
+                             sides=ANALYTICS_SIDES,
+                             rotations=ANALYTICS_ROTATIONS,
+                             steps=ANALYTICS_STEPS,
+                             use_subject_averages=USE_SUBJECT_AVERAGES):
+    """
+    Analytical graphs computed over the trials (no polygon/fixation panels):
         1. ellipse axis lengths, Filled vs Unfilled (always both).
         2. ellipse-center offset from original centroid & center of mass.
         3. mean ellipse-center offset vs step size.
         4. mean ellipse-center offset vs polygon rotation.
         5. mean ellipse orientation vs polygon rotation.
+        6. screen-center bias of the gaze displacement (if SHOW_CENTER_BIAS).
     Graphs 2-5 split by fill when `fill == 'both'`, else show one condition.
+
+    `rotations` / `steps` (lists or None) restrict the dataset to those polygon
+    rotations / stretch steps. This filters by stimulus geometry only -- all
+    participants are always pooled.
     """
-    records, n_sessions = collect_all_stats(root_dir, aggregate=aggregate)
-    usable = [r for r in records
-              if r['stats'] is not None and r['is_filled'] is not None]
-    if not usable:
-        print('[all-data] no valid Gaussian fits; nothing to plot.')
+    # Optional geometry filters (not by participant). Accept a single value or a
+    # list/tuple/set; None means no filtering.
+    def _as_set(v):
+        if v is None:
+            return None
+        return set(v) if isinstance(v, (list, tuple, set)) else {v}
+
+    sides_set, rot_set, step_set = (_as_set(sides), _as_set(rotations),
+                                    _as_set(steps))
+
+    def _filt(recs):
+        if sides_set is not None:
+            recs = [r for r in recs if r['sides'] in sides_set]
+        if rot_set is not None:
+            recs = [r for r in recs if r['rotation'] in rot_set]
+        if step_set is not None:
+            recs = [r for r in recs if r['step'] in step_set]
+        return recs
+
+    # Pooled records (one ellipse per trial across all participants). These drive
+    # the orientation and ellipse-shape figures ALWAYS, regardless of the
+    # subject-averages option.
+    pooled, n_sessions = collect_all_stats(root_dir, aggregate=aggregate)
+    pooled = _filt([r for r in pooled
+                    if r['stats'] is not None and r['is_filled'] is not None])
+    if not pooled:
+        print('[all-data] no trials after filtering; nothing to plot.')
         return
-    print(f"[all-data] {len(usable)} ellipses from {n_sessions} session(s).")
+
+    # Distance/offset records. With subject averages, use per-(subject, trial)
+    # arithmetic gaze centroids (no ellipse fit); otherwise reuse the pooled set.
+    bs = use_subject_averages
+    if bs:
+        dist_recs, _ = collect_all_stats(root_dir, aggregate=aggregate,
+                                         by_subject=True)
+        dist_recs = _filt([r for r in dist_recs if r['is_filled'] is not None])
+    else:
+        dist_recs = pooled
+
+    filt = []
+    if sides is not None:
+        filt.append(f"sides={sides}")
+    if rotations is not None:
+        filt.append(f"rotations={rotations}")
+    if steps is not None:
+        filt.append(f"steps={steps}")
+    filt_note = f" ({', '.join(filt)})" if filt else ""
+    dist_note = (f"; {len(dist_recs)} per-subject trial centroids for distances"
+                 if bs else "")
+    print(f"[all-data] {len(pooled)} pooled ellipses (orientation/shape) from "
+          f"{n_sessions} session(s){dist_note}{filt_note}.")
 
     fills_to_plot = _fills_to_plot(fill)
-    _fig_axis_length_bars(usable, title='All trials — mean model axis lengths (±SD)')
-    _fig_offset_bars(usable, fills_to_plot)
-    _fig_offset_vs(usable, fills_to_plot, 'step', 'Stretch step level',
+    # Orientation & ellipse parameters: ALWAYS pooled across all trials.
+    _fig_axis_length_bars(pooled, title='All trials — mean model axis lengths (±SD)',
+                          by_subject=False)
+    _fig_orientation_vs_rotation(pooled, fills_to_plot, by_subject=False)
+    # Distances & offsets (incl. center bias): subject-level when requested.
+    _fig_offset_bars(dist_recs, fills_to_plot, by_subject=bs)
+    _fig_offset_vs(dist_recs, fills_to_plot, 'step', 'Stretch step level',
                    'All trials — mean offset from centroids vs step size',
-                   dodge=0.08)
-    _fig_offset_vs(usable, fills_to_plot, 'rotation', 'Polygon rotation (deg)',
+                   dodge=0.08, by_subject=bs)
+    _fig_offset_vs(dist_recs, fills_to_plot, 'rotation', 'Polygon rotation (deg)',
                    'All trials — mean offset from centroids vs polygon rotation',
-                   dodge=4.0)
-    _fig_orientation_vs_rotation(usable, fills_to_plot)
+                   dodge=4.0, by_subject=bs)
+    if SHOW_CENTER_BIAS:
+        _fig_center_bias(dist_recs, fills_to_plot, by_subject=bs)
     plt.show()
 
 
