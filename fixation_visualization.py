@@ -107,9 +107,9 @@ SHOW_CENTER_BIAS = True     # add the screen-center bias analysis figure
 SHOW_RAW_POINTS = True      # overlay individual-trial points on the mean/SD plots
 # Restrict the analytics dataset to specific polygon sides / rotations / stretch
 # steps (this does NOT filter by participant). None = use all values.
-ANALYTICS_SIDES = 7      # e.g. 7 or [5, 6] to keep only those vertex counts
-ANALYTICS_ROTATIONS = [0]  # e.g. [0, 90] to keep only those rotations
-ANALYTICS_STEPS = -1, 0, 1, 3, 4      # e.g. [3, 4] to keep only those stretch steps
+ANALYTICS_SIDES = None     # e.g. 7 or [5, 6] to keep only those vertex counts
+ANALYTICS_ROTATIONS = None  # e.g. [0, 90] to keep only those rotations
+ANALYTICS_STEPS = [3, 4]      # e.g. [3, 4] to keep only those stretch steps
 # When True, fit a per-participant ellipse per trial and AVERAGE within each
 # subject+condition first, so every plotted point / statistical observation is a
 # subject mean (repeated-measures), not an individual trial. When False, all
@@ -168,8 +168,8 @@ SHOW_STATS_PLOT = False       # in 'multi' mode, also emit the statistical-infer
 # 'variations': fix (sides, rotation), show every step/variation at that rotation.
 MULTI_GROUP_BY = 'variations'
 MULTI_SIDES =  7     # number of polygon vertices to select
-MULTI_STEP =  4            # used when MULTI_GROUP_BY == 'rotations'
-MULTI_ROTATION = 0    # used when MULTI_GROUP_BY == 'variations'
+MULTI_STEP =  None            # used when MULTI_GROUP_BY == 'rotations'
+MULTI_ROTATION = None    # used when MULTI_GROUP_BY == 'variations'
 MULTI_AGGREGATE = True    # True: pool fixations across all sessions; False: EXAMPLE_SESSION only
 # Each geometric polygon was shown twice: once image-filled, once not. Choose
 # which to display so the figure is not overcrowded.
@@ -1836,7 +1836,7 @@ def _fig_center_bias(usable, fills_to_plot, by_subject=False):
                                    constrained_layout=True)
 
     # ---- Left: gaze vectors in full-screen space ------------------------- #
-    scale = 4.0                              # exaggerate gaze vectors for clarity
+    scale = 2.0                              # exaggerate gaze vectors for clarity
     for d in rows:
         col = 'tab:green' if d['proj'] >= 0 else 'tab:red'
         tip = d['pc'] + d['gvec'] * scale
