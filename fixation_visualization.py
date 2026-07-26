@@ -102,19 +102,19 @@ FILL_COLORS = {True: '#3498DB', False: '#E67E22'}   # filled = blue, unfilled = 
 #   3. mean ellipse-center offset vs step size
 # ANALYTICS_FILL controls whether graphs 2 & 3 split by fill ('both') or show a
 # single condition ('filled' | 'unfilled'); graph 1 always compares both.
-ANALYTICS_FILL = 'filled'   # 'filled' | 'unfilled' | 'both'
+ANALYTICS_FILL = 'both'   # 'filled' | 'unfilled' | 'both'
 SHOW_CENTER_BIAS = True     # add the screen-center bias analysis figure
 SHOW_RAW_POINTS = True      # overlay individual-trial points on the mean/SD plots
 # Restrict the analytics dataset to specific polygon sides / rotations / stretch
 # steps (this does NOT filter by participant). None = use all values.
 ANALYTICS_SIDES = None     # e.g. 7 or [5, 6] to keep only those vertex counts
 ANALYTICS_ROTATIONS = None  # e.g. [0, 90] to keep only those rotations
-ANALYTICS_STEPS = [3, 4]      # e.g. [3, 4] to keep only those stretch steps
+ANALYTICS_STEPS = None      # e.g. [3, 4] to keep only those stretch steps
 # When True, fit a per-participant ellipse per trial and AVERAGE within each
 # subject+condition first, so every plotted point / statistical observation is a
 # subject mean (repeated-measures), not an individual trial. When False, all
 # participants' fixations are pooled into one ellipse per trial (the default).
-USE_SUBJECT_AVERAGES = True
+USE_SUBJECT_AVERAGES = False
 
 # --- Statistical significance annotations (analytics graphs) ---
 # Annotate statistically significant points/comparisons with an asterisk (*).
@@ -123,7 +123,7 @@ USE_SUBJECT_AVERAGES = True
 #     first x value) of the same curve.
 # When several curves share an axes, the asterisk takes its curve's color (and
 # is vertically staggered) for readability; a single curve uses black.
-SHOW_SIGNIFICANCE = False   # toggle the significance asterisks
+SHOW_SIGNIFICANCE = True   # toggle the significance asterisks
 SIGNIFICANCE_ALPHA = 0.05  # p-value threshold for marking a point significant
 
 # --- Fixation time window ---
@@ -766,6 +766,14 @@ def is_significant(p, alpha=None):
     if alpha is None:
         alpha = SIGNIFICANCE_ALPHA
     return p is not None and p == p and p < alpha   # p == p rejects NaN
+
+
+def _fmt_p(p):
+    """Format a p-value for console printing (with a significance marker)."""
+    if p is None or p != p:                 # None or NaN
+        return 'n/a'
+    star = ' *' if p < SIGNIFICANCE_ALPHA else ''
+    return (f'{p:.2e}{star}' if p < 0.001 else f'{p:.3f}{star}')
 
 
 def _annotate_star(ax, x, y, color='black'):
@@ -1472,6 +1480,20 @@ def _draw_grouped_bars(ax, usable, fills_to_plot, metrics, value_fn, ylabel,
     if len(fills_to_plot) > 1:
         ax.legend(title='Condition', loc='upper left')
 
+    # --- print the p-value(s) for this graph ---
+    print(f"[p] {title}")
+    if {True, False} <= set(fills_to_plot):
+        for mi, (label, _k) in enumerate(metrics):
+            p = welch_p(raw.get((mi, True)), raw.get((mi, False)))
+            print(f"    {label.replace(chr(10), ' ')}: Filled vs Unfilled "
+                  f"(Welch t)  p={_fmt_p(p)}")
+    elif len(metrics) == 2:
+        isf = fills_to_plot[0]
+        p = paired_p(raw.get((0, isf)), raw.get((1, isf)))
+        c0 = metrics[0][0].replace(chr(10), ' ')
+        c1 = metrics[1][0].replace(chr(10), ' ')
+        print(f"    {c0} vs {c1} (paired t)  p={_fmt_p(p)}")
+
 
 def _fig_offset_bars(usable, fills_to_plot, by_subject=False):
     """Grouped bars: mean ellipse-center offset from each centroid (+/-SD)."""
@@ -1629,6 +1651,24 @@ def _fig_offset_vs(usable, fills_to_plot, xkey, xlabel, title, dodge,
         fig.legend(handles, labels, loc='outside lower center',
                    ncol=min(len(handles), 2), fontsize=8)
 
+    # --- print the p-value(s) for this graph ---
+    # Both conditions: Filled vs Unfilled per centroid, at each x. Single
+    # condition: the two centroids vs each other (paired), at each x.
+    print(f"[p] {title}")
+    if {True, False} <= set(fills_to_plot):
+        for mi, (name, _k, _ls, _sh) in enumerate(metrics):
+            for xv in xvals:
+                p = welch_p(samples.get((mi, True, xv)),
+                            samples.get((mi, False, xv)))
+                print(f"    {name} @ {xlabel.split()[0].lower()}={xv}: "
+                      f"Filled vs Unfilled  p={_fmt_p(p)}")
+    else:
+        isf = fills_to_plot[0]
+        for xv in xvals:
+            p = paired_p(samples.get((0, isf, xv)), samples.get((1, isf, xv)))
+            print(f"    original centroid vs center of mass @ "
+                  f"{xlabel.split()[0].lower()}={xv} (paired)  p={_fmt_p(p)}")
+
 
 def _add_regression(ax, xs, ys, color, x_range):
     """Draw an OLS trendline + 95% CI band over `x_range`; return a stats string.
@@ -1771,6 +1811,14 @@ def _fig_orientation_vs_rotation(usable, fills_to_plot, by_subject=False):
     if len(fills_to_plot) > 1:
         ax.legend(title='Condition', loc='upper left')
 
+    # --- print the p-value(s) for this graph (orientation~rotation regression) ---
+    print('[p] All trials — mean Model orientation vs polygon rotation')
+    if reg_notes:
+        for text, _color in reg_notes:
+            print(f"    linear regression: {text}")
+    else:
+        print('    linear regression: n/a (too few points)')
+
 
 def _fig_center_bias(usable, fills_to_plot, by_subject=False):
     """Evaluate whether the gaze deviation is biased toward the screen center.
@@ -1898,6 +1946,12 @@ def _fig_center_bias(usable, fills_to_plot, by_subject=False):
                  bbox=dict(boxstyle='round,pad=0.35', facecolor='white',
                            edgecolor='0.6', alpha=0.9))
         y0 -= 0.085
+
+    # --- print the p-value(s) for this graph (one-sample t-test vs 0) ---
+    print('[p] Center-bias of gaze displacement (one-sample t-test of '
+          'projection vs 0)')
+    for text, _color in notes:
+        print(f"    {text}")
 
 
 def plot_all_data_statistics(root_dir, fill=ANALYTICS_FILL,
